@@ -1,14 +1,11 @@
 #include <Arduino.h>
 #include "FlightController/IMUManager.cpp"
 #include <SoftWire.h>
-//#include <analogWrite.h>
 #include "FlightController/ConnectionManager.cpp"
 #include "FlightController/PIDManager.cpp"
 #include "FlightController/MotorManagerPlus.cpp"
 #include "MegunoLink.h"
 #include "Filter.h"
-// #include "FlightController/EspConnectionManager.h"
-// #include <sstream>
 
 #define SPEED_RATE 3
 #define Serial Serial2

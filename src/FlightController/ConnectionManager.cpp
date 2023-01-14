@@ -54,7 +54,7 @@ class ConnectionManager
             this->connectionManager = connectionManager;
         }
 
-        void onConnect(NimBLEServer *pServer, ble_gap_conn_desc* desc)
+        void onConnect(NimBLEServer *pServer, ble_gap_conn_desc *desc)
         {
             pServer->updateConnParams(desc->conn_handle, 6, 8, 0, 60);
             this->connectionManager->connectionStateCallback->onConnectionStateChange(CONNECTED);
@@ -106,84 +106,44 @@ class ConnectionManager
 
         void onWrite(BLECharacteristic *pCharacteristic)
         {
-            int pitch_kp_raw = -1;
-            int pitch_ki_raw = -1;
-            int pitch_kd_raw = -1;
+            std::string data = pCharacteristic->getValue();
 
-            int roll_kp_raw = -1;
-            int roll_ki_raw = -1;
-            int roll_kd_raw = -1;
+            std::string pitch_kp_hex = data.substr(0, 2);
+            std::string pitch_ki_hex = data.substr(2, 2);
+            std::string pitch_kd_hex = data.substr(4, 2);
 
-            int yaw_kp_raw = -1;
-            int yaw_ki_raw = -1;
-            int yaw_kd_raw = -1;
+            std::string roll_kp_hex = data.substr(6, 2);
+            std::string roll_ki_hex = data.substr(8, 2);
+            std::string roll_kd_hex = data.substr(10, 2);
 
-            std::string value = pCharacteristic->getValue();
-            Serial.println(String(value.c_str()));
-            char *cstr = new char[value.length() + 1];
-            strcpy(cstr, value.c_str());
+            std::string yaw_kp_hex = data.substr(12, 2);
+            std::string yaw_ki_hex = data.substr(14, 2);
+            std::string yaw_kd_hex = data.substr(16, 2);
 
-            char *splited = strtok(cstr, ",");
+            std::string hold_kp_hex = data.substr(18, 2);
+            std::string hold_ki_hex = data.substr(20, 2);
+            std::string hold_kd_hex = data.substr(22, 2);
 
-            while (splited != NULL)
-            {
-                if (pitch_kp_raw == -1)
-                {
-                    pitch_kp_raw = strToInt(splited);
-                }
+            int pitch_kp_raw = strtol(pitch_kp_hex.c_str(), nullptr, 16);
+            int pitch_ki_raw = strtol(pitch_ki_hex.c_str(), nullptr, 16);
+            int pitch_kd_raw = strtol(pitch_kd_hex.c_str(), nullptr, 16);
 
-                else if (pitch_ki_raw == -1)
-                {
-                    pitch_ki_raw = strToInt(splited);
-                }
+            int roll_kp_raw = strtol(roll_kp_hex.c_str(), nullptr, 16);
+            int roll_ki_raw = strtol(roll_ki_hex.c_str(), nullptr, 16);
+            int roll_kd_raw = strtol(roll_kd_hex.c_str(), nullptr, 16);
 
-                else if (pitch_kd_raw == -1)
-                {
-                    pitch_kd_raw = strToInt(splited);
-                }
+            int yaw_kp_raw = strtol(yaw_kp_hex.c_str(), nullptr, 16);
+            int yaw_ki_raw = strtol(yaw_ki_hex.c_str(), nullptr, 16);
+            int yaw_kd_raw = strtol(yaw_kd_hex.c_str(), nullptr, 16);
 
-                else if (roll_kp_raw == -1)
-                {
-                    roll_kp_raw = strToInt(splited);
-                }
-
-                else if (roll_ki_raw == -1)
-                {
-                    roll_ki_raw = strToInt(splited);
-                }
-
-                else if (roll_kd_raw == -1)
-                {
-                    roll_kd_raw = strToInt(splited);
-                }
-
-                else if (yaw_kp_raw == -1)
-                {
-                    yaw_kp_raw = strToInt(splited);
-                }
-
-                else if (yaw_ki_raw == -1)
-                {
-                    yaw_ki_raw = strToInt(splited);
-                }
-
-                else
-                {
-                    yaw_kd_raw = strToInt(splited);
-                }
-
-                splited = strtok(NULL, ",");
-            }
+            int hold_kp_raw = strtol(hold_kp_hex.c_str(), nullptr, 16);
+            int hold_ki_raw = strtol(hold_ki_hex.c_str(), nullptr, 16);
+            int hold_kd_raw = strtol(hold_kd_hex.c_str(), nullptr, 16);
 
             this->connectionManager->gainCallback->onNewGain(pitch_kp_raw / 100.0, pitch_ki_raw / 100.0, pitch_kd_raw / 100.0,
                                                              roll_kp_raw / 100.0, roll_ki_raw / 100.0, roll_kd_raw / 100.0,
-                                                             yaw_kp_raw / 100.0, yaw_ki_raw / 100.0, yaw_kd_raw / 100.0);
-        }
-
-        int strToInt(char *str)
-        {
-            String valueAsString = String(str);
-            return valueAsString.toInt();
+                                                             yaw_kp_raw / 100.0, yaw_ki_raw / 100.0, yaw_kd_raw / 100.0,
+                                                             hold_kp_raw / 100.0, hold_ki_raw / 100.0, hold_kd_raw / 100.0);
         }
     };
 
