@@ -1,6 +1,8 @@
 #include <NimBLEDevice.h>
 #include <Arduino.h>
 
+using namespace std;
+
 enum ConnectionState
 {
     CONNECTED,
@@ -31,18 +33,15 @@ class ConnectionManager
 {
 
 #define DRONE_SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define ATTITUDE_CHARACTERISTIC_UUID "fbf426ba-5f90-11ec-bf63-0242ac130002"
-#define ANGLES_CHARACTERISTIC_UUID "450f2462-5f91-11ec-bf63-0242ac130002"
-#define PID_CHARACTERISTIC_UUID "029d7bb4-5f92-11ec-bf63-0242ac130002"
-#define MOTOR_SPEED_CHARACTERISTIC_UUID "9178300e-5ffb-11ec-bf63-0242ac130002"
-#define GENERAL_MSG_CHARACTERISTIC_UUID "3e56610a-5ffb-11ec-bf63-0242ac130002"
-#define NEW_GAIN_CHARACTERISTIC_UUID "ec743a01-5ffb-11ec-bf63-0242ac130002"
+#define CONTROL_CHARACTERISTIC_UUID "fbf426ba-5f90-11ec-bf63-0242ac130002"
+#define DATA_CHARACTERISTIC_UUID "3e56610a-5ffb-11ec-bf63-0242ac130002"
+#define COMMAND_CHARACTERISTIC_UUID "ec743a01-5ffb-11ec-bf63-0242ac130002"
 
     DroneAttitudeCallback *droneAttitudeCallback;
     ConnectionStateCallback *connectionStateCallback;
     GainCallback *gainCallback;
 
-    BLECharacteristic *pThrustCharacteristic, *pGainCharacteristic, *pAnglesCharacteristic, *pPIDsCharacteristic, *pMotorSpeedCharacteristic, *pGeneralMsgCharacteristic;
+    BLECharacteristic *pControlCharacteristic, *pCommandCharacteristic, *pDataCharacteristic;
 
     class ServerCallback : public BLEServerCallbacks
     {
@@ -57,21 +56,26 @@ class ConnectionManager
         void onConnect(NimBLEServer *pServer, ble_gap_conn_desc *desc)
         {
             pServer->updateConnParams(desc->conn_handle, 6, 8, 0, 60);
-            this->connectionManager->connectionStateCallback->onConnectionStateChange(CONNECTED);
         }
 
         void onDisconnect(NimBLEServer *pServer)
         {
             this->connectionManager->connectionStateCallback->onConnectionStateChange(DISCONNECTED);
         }
+
+        void onMTUChange(uint16_t MTU, ble_gap_conn_desc *desc)
+        {
+            //Serial.printf("MTU updated: %u for connection ID: %u\n", MTU, desc->conn_handle);
+            this->connectionManager->connectionStateCallback->onConnectionStateChange(CONNECTED);
+        }
     };
 
-    class AttitudeCharCallbacks : public BLECharacteristicCallbacks
+    class ControlCharCallbacks : public BLECharacteristicCallbacks
     {
         ConnectionManager *connectionManager;
 
     public:
-        AttitudeCharCallbacks(ConnectionManager *connectionManager)
+        ControlCharCallbacks(ConnectionManager *connectionManager)
         {
             this->connectionManager = connectionManager;
         }
@@ -94,12 +98,12 @@ class ConnectionManager
         }
     };
 
-    class NewGainCharCallbacks : public BLECharacteristicCallbacks
+    class CommandCharCallbacks : public BLECharacteristicCallbacks
     {
         ConnectionManager *connectionManager;
 
     public:
-        NewGainCharCallbacks(ConnectionManager *connectionManager)
+        CommandCharCallbacks(ConnectionManager *connectionManager)
         {
             this->connectionManager = connectionManager;
         }
@@ -120,9 +124,9 @@ class ConnectionManager
             std::string yaw_ki_hex = data.substr(14, 2);
             std::string yaw_kd_hex = data.substr(16, 2);
 
-            std::string hold_kp_hex = data.substr(18, 2);
-            std::string hold_ki_hex = data.substr(20, 2);
-            std::string hold_kd_hex = data.substr(22, 2);
+            // std::string hold_kp_hex = data.substr(18, 2);
+            // std::string hold_ki_hex = data.substr(20, 2);
+            // std::string hold_kd_hex = data.substr(22, 2);
 
             int pitch_kp_raw = strtol(pitch_kp_hex.c_str(), nullptr, 16);
             int pitch_ki_raw = strtol(pitch_ki_hex.c_str(), nullptr, 16);
@@ -136,38 +140,55 @@ class ConnectionManager
             int yaw_ki_raw = strtol(yaw_ki_hex.c_str(), nullptr, 16);
             int yaw_kd_raw = strtol(yaw_kd_hex.c_str(), nullptr, 16);
 
-            int hold_kp_raw = strtol(hold_kp_hex.c_str(), nullptr, 16);
-            int hold_ki_raw = strtol(hold_ki_hex.c_str(), nullptr, 16);
-            int hold_kd_raw = strtol(hold_kd_hex.c_str(), nullptr, 16);
+            // int hold_kp_raw = strtol(hold_kp_hex.c_str(), nullptr, 16);
+            // int hold_ki_raw = strtol(hold_ki_hex.c_str(), nullptr, 16);
+            // int hold_kd_raw = strtol(hold_kd_hex.c_str(), nullptr, 16);
 
             this->connectionManager->gainCallback->onNewGain(pitch_kp_raw / 100.0, pitch_ki_raw / 100.0, pitch_kd_raw / 100.0,
                                                              roll_kp_raw / 100.0, roll_ki_raw / 100.0, roll_kd_raw / 100.0,
-                                                             yaw_kp_raw / 100.0, yaw_ki_raw / 100.0, yaw_kd_raw / 100.0,
-                                                             hold_kp_raw / 100.0, hold_ki_raw / 100.0, hold_kd_raw / 100.0);
+                                                             yaw_kp_raw / 100.0, yaw_ki_raw / 100.0, yaw_kd_raw / 100.0);
+            //  hold_kp_raw / 100.0, hold_ki_raw / 100.0, hold_kd_raw / 100.0);
         }
     };
 
-    class AnglesCharCallbacks : public BLECharacteristicCallbacks
+    class DataCharCallbacks : public BLECharacteristicCallbacks
     {
-        void onWrite(BLECharacteristic *pCharacteristic)
-        {
-            std::string value = pCharacteristic->getValue();
-        }
-    };
+        ConnectionManager *connectionManager;
 
-    class PIDsCharCallbacks : public BLECharacteristicCallbacks
-    {
-        void onWrite(BLECharacteristic *pCharacteristic)
+    public:
+        DataCharCallbacks(ConnectionManager *connectionManager)
         {
-            std::string value = pCharacteristic->getValue();
+            this->connectionManager = connectionManager;
         }
-    };
 
-    class MotorSpeedCharCallbacks : public BLECharacteristicCallbacks
-    {
-        void onWrite(BLECharacteristic *pCharacteristic)
+        void onRead(NimBLECharacteristic *pCharacteristic)
         {
-            std::string value = pCharacteristic->getValue();
+            // Serial.print("DataChar read done at millis = ");
+            // Serial.println(millis());
+        }
+
+        void onRead(NimBLECharacteristic *pCharacteristic, ble_gap_conn_desc *desc)
+        {
+            // Serial.print("DataChar read_2 done at millis = ");
+            // Serial.println(millis());
+        }
+
+        void onWrite(NimBLECharacteristic *pCharacteristic)
+        {
+            // Serial.print("DataChar write done at millis = ");
+            // Serial.println(millis());
+        }
+
+        void onWrite(NimBLECharacteristic *pCharacteristic, ble_gap_conn_desc *desc)
+        {
+            // Serial.print("DataChar write_2 done at millis = ");
+            // Serial.println(millis());
+        }
+
+        void onNotify(NimBLECharacteristic *pCharacteristic)
+        {
+            // Serial.print("DataChar notify done at millis = ");
+            // Serial.println(millis());
         }
     };
 
@@ -180,6 +201,7 @@ public:
         this->gainCallback = gainCallbak;
 
         BLEDevice::init("Eve-01");
+        BLEDevice::setMTU(517);
 
         BLEServer *pServer = BLEDevice::createServer();
         pServer->advertiseOnDisconnect(true);
@@ -187,22 +209,14 @@ public:
 
         BLEService *pService = pServer->createService(DRONE_SERVICE_UUID);
 
-        this->pThrustCharacteristic = pService->createCharacteristic(ATTITUDE_CHARACTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
-        this->pThrustCharacteristic->setCallbacks(new AttitudeCharCallbacks(this));
+        this->pControlCharacteristic = pService->createCharacteristic(CONTROL_CHARACTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+        this->pControlCharacteristic->setCallbacks(new ControlCharCallbacks(this));
 
-        this->pGainCharacteristic = pService->createCharacteristic(NEW_GAIN_CHARACTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
-        this->pGainCharacteristic->setCallbacks(new NewGainCharCallbacks(this));
+        this->pCommandCharacteristic = pService->createCharacteristic(COMMAND_CHARACTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+        this->pCommandCharacteristic->setCallbacks(new CommandCharCallbacks(this));
 
-        this->pAnglesCharacteristic = pService->createCharacteristic(ANGLES_CHARACTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-        this->pAnglesCharacteristic->setCallbacks(new AnglesCharCallbacks());
-
-        this->pPIDsCharacteristic = pService->createCharacteristic(PID_CHARACTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-        this->pPIDsCharacteristic->setCallbacks(new PIDsCharCallbacks());
-
-        this->pMotorSpeedCharacteristic = pService->createCharacteristic(MOTOR_SPEED_CHARACTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-        this->pMotorSpeedCharacteristic->setCallbacks(new MotorSpeedCharCallbacks());
-
-        this->pGeneralMsgCharacteristic = pService->createCharacteristic(GENERAL_MSG_CHARACTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+        this->pDataCharacteristic = pService->createCharacteristic(DATA_CHARACTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+        this->pDataCharacteristic->setCallbacks(new DataCharCallbacks(this));
 
         pService->start();
 
@@ -210,27 +224,15 @@ public:
         pAdvertising->start();
     }
 
-    void writeAngles(std::string value)
-    {
-        this->pAnglesCharacteristic->setValue(value);
-        this->pAnglesCharacteristic->notify(true);
-    }
-
-    void writePIDs(std::string value)
-    {
-        this->pPIDsCharacteristic->setValue(value);
-        this->pPIDsCharacteristic->notify(true);
-    }
-
-    void writeMotorCurrentThrust(std::string value)
-    {
-        this->pMotorSpeedCharacteristic->setValue(value);
-        this->pMotorSpeedCharacteristic->notify(true);
-    }
-
     void write20ByteMsg(std::string msg)
     {
-        this->pGeneralMsgCharacteristic->setValue(msg);
-        this->pGeneralMsgCharacteristic->notify(true);
+        this->pDataCharacteristic->setValue(msg);
+        this->pDataCharacteristic->notify(true);
+    }
+
+    void writeRecords(vector<uint8_t> records)
+    {
+        this->pDataCharacteristic->setValue(records.data(), records.size());
+        this->pDataCharacteristic->notify(true);
     }
 };

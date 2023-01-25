@@ -1,11 +1,18 @@
 #include <Arduino.h>
-#include "FlightController/IMUManager.cpp"
+#include "flightController/IMUManager.cpp"
 #include <SoftWire.h>
-#include "FlightController/ConnectionManager.cpp"
-#include "FlightController/PIDManager.cpp"
-#include "FlightController/MotorManagerPlus.cpp"
+#include "flightController/ConnectionManager.cpp"
+#include "flightController/PIDManager.cpp"
+#include "flightController/MotorManagerPlus.cpp"
 #include "MegunoLink.h"
 #include "Filter.h"
+#include "flightRecorder/FlightRecorder.cpp"
+// #include <Wire.h>
+// #include <VL53L0X.h>
+
+// VL53L0X sensor;
+
+using namespace std;
 
 #define SPEED_RATE 3
 #define Serial Serial2
@@ -32,6 +39,7 @@ IMUManager imu;
 PIDManager mPID;
 MotorManagerPlus motorManager;
 ConnectionManager connectionManager;
+FlightRecorder flightRecorder;
 
 int initial_speed = 0;
 
@@ -42,7 +50,7 @@ bool did_mesuare_offset = false;
 
 bool shouldLog = false;
 
-double setPoints[3] = {0, 0, 0};
+int setpoints[3] = {0, 0, 0};
 double current_angles[2] = {0, 0};
 double current_rates[3] = {0, 0, 0};
 
@@ -56,15 +64,37 @@ double yaw_rate_offset = 0;
 double pitch_rate_offset = 0;
 double roll_rate_offset = 0;
 
-// struct_attiude_message attiude;
+int16_t altitude_offest = 0;
+int16_t current_altitude = 0;
 
-class DronPidCallback : public PIDCallback
+PackedFlightRecord record;
+
+class RecorderCallback : public FlightRecorderCallback
+{
+  void onRecordsReady(vector<uint8_t> records)
+  {
+    connectionManager.writeRecords(records);
+  }
+};
+
+class DronePidCallback : public PIDCallback
 {
   void onPIDChange(
       double pitch_p, double pitch_i, double pitch_d,
       double roll_p, double roll_i, double roll_d,
       double yaw_p, double yaw_i, double yaw_d)
   {
+    record.pitch_p = pitch_p;
+    record.pitch_i = pitch_i;
+    record.pitch_d = pitch_d;
+
+    record.roll_p = roll_p;
+    record.roll_i = roll_i;
+    record.roll_d = roll_d;
+
+    record.yaw_p = yaw_p;
+    record.yaw_i = yaw_i;
+    record.yaw_d = yaw_d;
 
     double pitch_pid = pitch_p + pitch_i - pitch_d;
     double roll_pid = roll_p + roll_i - roll_d;
@@ -99,6 +129,13 @@ class MotorCallback : public MotorSpeedCallback
     ledcWrite(RIGHT_MOTOR_CHANNEL, right_motor_thrust);
     ledcWrite(BOTTOM_MOTOR_CHANNEL, bottom_motor_thrust);
     ledcWrite(TOP_MOTOE_CHANNEL, top_motor_thrust);
+
+    record.top_motor_thrust = top_motor_thrust;
+    record.bottom_motor_thrust = bottom_motor_thrust;
+    record.right_motor_thrust = right_motor_thrust;
+    record.left_motor_thrust = left_motor_thrust;
+
+    flightRecorder.insertAndFlushIfReady(record);
 
     //  if (shouldLog)
     //     {
@@ -142,9 +179,9 @@ class DroneControlCallback : public DroneAttitudeCallback
   void onAttitudeChange(unsigned int thrust, unsigned int pitch_setpoint, unsigned int roll_setpoint, unsigned int yaw_setpoint)
   {
     initial_speed = thrust;
-    setPoints[0] = static_cast<double>(pitch_setpoint);
-    setPoints[1] = static_cast<double>(roll_setpoint);
-    setPoints[2] = static_cast<double>(yaw_setpoint);
+    setpoints[0] = static_cast<double>(pitch_setpoint);
+    setpoints[1] = static_cast<double>(roll_setpoint);
+    setpoints[2] = static_cast<double>(yaw_setpoint);
     // Serial2.print("thrust = ");
     //  Serial2.println(initial_speed);
     vTaskDelay(1);
@@ -221,6 +258,7 @@ void mesuareOffsets()
         sumYaw += imu.getGyroZ();
         sumPitchRate += imu.getGyroY();
         sumRollRate += imu.getGyroX();
+        //altitude_offest = sensor.readRangeContinuousMillimeters();
       }
       counter++;
       delay(5);
@@ -262,15 +300,16 @@ void setup()
   pinMode(BOTTOM_MOTOR_PIN, OUTPUT);
   pinMode(RIGHT_MOTOR_PIN, OUTPUT);
   pinMode(LEFT_MOTOR_PIN, OUTPUT);
-  // if (shouldLog)
-  // {
-  //   Serial2.begin(9600);
-  // }
+  if (shouldLog)
+  {
+    Serial.begin(9600);
+  }
   connectionManager.begin(new DroneConnectionCallback(), new DroneControlCallback(), new NewGainCallback());
   // begin_esp_now(new DroneConnectionCallback(), new DroneControlCallback(), new NewGainCallback());
-  mPID.begin(new DronPidCallback());
+  mPID.begin(new DronePidCallback());
   motorManager.begin(new MotorCallback());
   mPID.reset(pitch_gains, roll_gains, yaw_gains);
+  flightRecorder.begin(new RecorderCallback());
 
   initServo();
 
@@ -282,11 +321,26 @@ void setup()
 
   imu.imuSetup();
 
+  // sensor.setTimeout(500);
+  // if (!sensor.init())
+  // {
+  //   Serial.println("Failed to detect and initialize sensor!");
+  //   while (1)
+  //   {
+  //   }
+  // }
+
+  // sensor.startContinuous();
+
   Serial.println("All set!");
 }
 
 void calca_attitude()
 {
+ // int16_t altitude = sensor.readRangeContinuousMillimeters() - altitude_offest;
+//  altitude_filter.Filter(altitude);
+ // current_altitude = altitude_filter.Current();
+
   current_pitch_filter.Filter(static_cast<double>(imu.getPitch()) - pitch_offset);
   current_roll_filter.Filter(static_cast<double>(imu.getRoll()) - roll_offset);
 
@@ -316,6 +370,46 @@ void calca_attitude()
   // }
 }
 
+// void loop()
+// {
+//   vTaskDelay(10000);
+//   for (size_t i = 0; i < 20; i++)
+//   {
+//     PackedFlightRecord record = {
+//         .millis = static_cast<uint32_t>(millis()),
+//         .pitch_setpoint = 0,
+//         .roll_setpoint = 10,
+//         .yaw_setpoint = 30,
+
+//         .alttiude = 400,
+
+//         .pitch_angle = 10,
+//         .roll_angle = 2,
+//         .yaw_rate = 3,
+
+//         .pitch_p = 4,
+//         .pitch_i = 5,
+//         .pitch_d = 6,
+
+//         .roll_p = 4,
+//         .roll_i = 5,
+//         .roll_d = 6,
+
+//         .yaw_p = 7,
+//         .yaw_i = 8,
+//         .yaw_d = 9,
+
+//         .top_motor_thrust = 100,
+//         .bottom_motor_thrust = 100,
+//         .right_motor_thrust = 100,
+//         .left_motor_thrust = 111};
+
+//     delay(50);
+
+//     flightRecorder.insertAndFlushIfReady(record);
+//   }
+// }
+
 void loop()
 {
   if (!did_mesuare_offset)
@@ -341,12 +435,25 @@ void loop()
       calca_attitude();
     }
 
+    record = {
+        .millis = millis(),
+
+        .pitch_setpoint = (uint8_t)setpoints[0],
+        .roll_setpoint = (uint8_t)setpoints[1],
+        .yaw_setpoint = (uint8_t)setpoints[2],
+
+        .alttiude = (int16_t)initial_speed,
+
+        .pitch_angle = static_cast<int16_t>(current_angles[0]),
+        .roll_angle = static_cast<int16_t>(current_angles[1]),
+        .yaw_rate = static_cast<int16_t>(current_rates[2])};
+
     motorManager.set_initial_speed(initial_speed);
 
     if (initial_speed > 0)
     {
       mPID.setSampleTime(static_cast<double>(millis() - previous_millis) / 1000.0);
-      mPID.setSetPoints(setPoints);
+      mPID.setSetPoints(setpoints);
       mPID.setAngles(current_angles);
       mPID.setRates(current_rates);
       mPID.compute();

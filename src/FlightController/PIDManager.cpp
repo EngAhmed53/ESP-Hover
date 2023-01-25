@@ -6,8 +6,8 @@
 #define MINIMUM_OUTPUT -210.0
 #define MAXIMUM_NEGLECTED_ANGLE_ERROR 2.5  // in degress
 #define MINIMUM_NEGLECTED_ANGLE_ERROR -2.5 // in degress
-#define MAXIMUM_NEGLECTED_YAW_RATE 1       // in degree/sec
-#define MINIMUM_NEGLETED_YAW_RATE -1       // in degress/sec
+#define MAXIMUM_NEGLECTED_YAW_RATE 3       // in degree/sec
+#define MINIMUM_NEGLETED_YAW_RATE -3       // in degress/sec
 
 class PIDCallback
 {
@@ -19,7 +19,7 @@ class PIDManager
 {
     double sample_time;
 
-    double *setPoints;
+    int *setpoints;
     double *angles;
     double *rates;
 
@@ -69,9 +69,9 @@ public:
         this->sample_time = sampleTime;
     }
 
-    void setSetPoints(double setPoints[3])
+    void setSetPoints(int setpoints[3])
     {
-        this->setPoints = setPoints;
+        this->setpoints = setpoints;
     }
 
     void setAngles(double angles[2])
@@ -94,16 +94,16 @@ public:
     }
 
 private:
-    double setpointToAngle(double setpoint)
+    double setpointToAngle(int setpoint)
     {
         return (setpoint - 0.0) * (20.0 - (-20.0)) / (255 - 0) + (-20.0);
     }
 
-    double setpointToYawRate(double setpoint)
+    double setpointToYawRate(int setpoint)
     {
-        if (setpoint == 255.0)
+        if (setpoint == 255)
             return -65.0;
-        else if (setpoint == 127.0)
+        else if (setpoint == 127)
             return 65.0;
         else
             return 0.0;
@@ -111,7 +111,7 @@ private:
 
     void compute_pitch_pid()
     {
-        double pitch_setpoint_as_angle = setpointToAngle(setPoints[0]);
+        double pitch_setpoint_as_angle = setpointToAngle(setpoints[0]);
 
         double error = pitch_setpoint_as_angle - angles[0];
 
@@ -142,7 +142,7 @@ private:
 
     void compute_roll_pid()
     {
-        double roll_setpoint_as_angle = setpointToAngle(setPoints[1]) * -1;
+        double roll_setpoint_as_angle = setpointToAngle(setpoints[1]) * -1;
 
         double error = roll_setpoint_as_angle - angles[1];
 
@@ -175,7 +175,7 @@ private:
     void compute_yaw_pid()
     {
 
-        double yaw_setpoint_as_rate = setpointToYawRate(setPoints[2]);
+        double yaw_setpoint_as_rate = setpointToYawRate(setpoints[2]);
 
         double error = yaw_setpoint_as_rate - rates[2];
 
