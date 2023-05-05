@@ -1,62 +1,63 @@
 #include <Arduino.h>
-#include "flightController/IMUManager.cpp"
-#include <SoftWire.h>
-#include "flightController/ConnectionManager.cpp"
-#include "flightController/PIDManager.cpp"
-#include "flightController/MotorManagerPlus.cpp"
-#include "MegunoLink.h"
+#include "../include/model.h"
+#include "../include/BLEManager.h"
+#include "../include/PID.h"
+#include "../include/FlightRecorder.h"
+#include "../include/Log.h"
+#include "../include/PlusQuadThrustManager.h"
+#include "IMUManager.cpp"
 #include "Filter.h"
-#include "flightRecorder/FlightRecorder.cpp"
-// #include <Wire.h>
-// #include <VL53L0X.h>
 
-// VL53L0X sensor;
+//#define DebugMode
+//#define SerialDebugMode
 
-using namespace std;
+#define MOTOR_HIGH_BOUNDARY 210.0
+#define MOTOR_LOW_BOUNDARY (-210.0)
 
-#define SPEED_RATE 3
-#define Serial Serial2
+#define LED_PIN 2
 
-#define TOP_MOTOR_PIN 32
-#define TOP_MOTOE_CHANNEL 2
+#define MOTOR_A_PIN 32
+#define MOTOR_A_CHANNEL 2
 
-#define BOTTOM_MOTOR_PIN 18
-#define BOTTOM_MOTOR_CHANNEL 0
+#define MOTOR_B_PIN 18
+#define MOTOR_B_CHANNEL 0
 
-#define RIGHT_MOTOR_PIN 19
-#define RIGHT_MOTOR_CHANNEL 3
+#define MOTOR_C_PIN 19
+#define MOTOR_C_CHANNEL 3
 
-#define LEFT_MOTOR_PIN 4
-#define LEFT_MOTOR_CHANNEL 1
+#define MOTOR_D_PIN 4
+#define MOTOR_D_CHANNEL 1
 
-ExponentialFilter<double> current_pitch_filter = ExponentialFilter<double>(80, 0);
-ExponentialFilter<double> current_roll_filter = ExponentialFilter<double>(80, 0);
+
+ExponentialFilter<double> pitch_filter = ExponentialFilter<double>(80, 0);
+ExponentialFilter<double> roll_filter = ExponentialFilter<double>(80, 0);
 ExponentialFilter<double> gyroZ_filter = ExponentialFilter<double>(80, 0);
 ExponentialFilter<double> gyroX_filter = ExponentialFilter<double>(80, 0);
 ExponentialFilter<double> gyroY_filter = ExponentialFilter<double>(80, 0);
 
 IMUManager imu;
-PIDManager mPID;
-MotorManagerPlus motorManager;
-ConnectionManager connectionManager;
-FlightRecorder flightRecorder;
 
-int initial_speed = 0;
+std::shared_ptr<BLEManager> bleManager = std::make_shared<BLEManager>();
 
-int previous_millis = 0;
+PID pitchPID(MOTOR_HIGH_BOUNDARY, MOTOR_LOW_BOUNDARY);
+PID rollPID(MOTOR_HIGH_BOUNDARY, MOTOR_LOW_BOUNDARY);
+PID yawPID(MOTOR_HIGH_BOUNDARY, MOTOR_LOW_BOUNDARY);
+
+PlusQuadThrustManager thrustManager(MOTOR_HIGH_BOUNDARY, MOTOR_LOW_BOUNDARY, 80);
+
+FlightRecorder flightRecorder([](std::vector<uint8_t> &&buffer) {
+    bleManager->writeRecords(std::move(buffer));
+});
+
+FlightRecord record;
+
+unsigned long previous_millis = 0;
 
 bool isConnected = false;
-bool did_mesuare_offset = false;
+bool isArmed = false;
 
-bool shouldLog = false;
-
-int setpoints[3] = {0, 0, 0};
 double current_angles[2] = {0, 0};
 double current_rates[3] = {0, 0, 0};
-
-double pitch_gains[3] = {0.46, 0.9, 0.35};
-double roll_gains[3] = {0.42, 0.85, 0.35};
-double yaw_gains[2] = {0.45, 0.9};
 
 double pitch_offset = 0;
 double roll_offset = 0;
@@ -64,408 +65,303 @@ double yaw_rate_offset = 0;
 double pitch_rate_offset = 0;
 double roll_rate_offset = 0;
 
-int16_t altitude_offest = 0;
-int16_t current_altitude = 0;
+SemaphoreHandle_t xMutex{xSemaphoreCreateMutex()};
+QueueHandle_t attitudeQueueHandle = xQueueCreate(100, sizeof(AttitudeModel));
+QueueHandle_t gainsQueueHandle = xQueueCreate(1, sizeof(AttitudeModel));
+TickType_t sendWaitTime = pdMS_TO_TICKS(10);
+TickType_t receiveWaitTime = pdMS_TO_TICKS(1);
 
-PackedFlightRecord record;
+void onConnectionChangeCallback(ConnectionState state) {
+    xSemaphoreTake(xMutex, portMAX_DELAY);
+    isConnected = state == ConnectionState::CONNECTED;
+    xSemaphoreGive(xMutex);
+    digitalWrite(LED_PIN, isConnected ? HIGH : LOW);
+}
 
-class RecorderCallback : public FlightRecorderCallback
-{
-  void onRecordsReady(vector<uint8_t> records)
-  {
-    connectionManager.writeRecords(records);
-  }
-};
+double setPointToAngle(int setPoint) {
+    return (setPoint - 0.0) * (20.0 - (-20.0)) / (255 - 0) + (-20.0);
+}
 
-class DronePidCallback : public PIDCallback
-{
-  void onPIDChange(
-      double pitch_p, double pitch_i, double pitch_d,
-      double roll_p, double roll_i, double roll_d,
-      double yaw_p, double yaw_i, double yaw_d)
-  {
-    record.pitch_p = pitch_p;
-    record.pitch_i = pitch_i;
-    record.pitch_d = pitch_d;
-
-    record.roll_p = roll_p;
-    record.roll_i = roll_i;
-    record.roll_d = roll_d;
-
-    record.yaw_p = yaw_p;
-    record.yaw_i = yaw_i;
-    record.yaw_d = yaw_d;
-
-    double pitch_pid = pitch_p + pitch_i - pitch_d;
-    double roll_pid = roll_p + roll_i - roll_d;
-    double yaw_pid = yaw_p + yaw_i - yaw_d;
-
-    // check values range
-    pitch_pid = pitch_pid > MAXIMUM_OUTPUT ? MAXIMUM_OUTPUT : pitch_pid;
-    roll_pid = roll_pid > MAXIMUM_OUTPUT ? MAXIMUM_OUTPUT : roll_pid;
-    yaw_pid = yaw_pid > MAXIMUM_OUTPUT ? MAXIMUM_OUTPUT : yaw_pid;
-
-    pitch_pid = pitch_pid < MINIMUM_OUTPUT ? MINIMUM_OUTPUT : pitch_pid;
-    roll_pid = roll_pid < MINIMUM_OUTPUT ? MINIMUM_OUTPUT : roll_pid;
-    yaw_pid = yaw_pid < MINIMUM_OUTPUT ? MINIMUM_OUTPUT : yaw_pid;
-
-    motorManager.updat_speeds(pitch_pid, roll_pid, yaw_pid);
-  }
-};
-
-class MotorCallback : public MotorSpeedCallback
-{
-  void onThrustChange(int top_motor_thrust, int bottom_motor_thrust, int right_motor_thrust, int left_motor_thrust)
-  {
-    // if (shouldLog)
-    // {
-    //   attiude.top_motor_thrust = top_motor_thrust;
-    //   attiude.bottom_motor_thrust = bottom_motor_thrust;
-    //   attiude.left_motor_thrust = left_motor_thrust;
-    //   attiude.right_motor_thrust = right_motor_thrust;
-    // }
-
-    ledcWrite(LEFT_MOTOR_CHANNEL, left_motor_thrust);
-    ledcWrite(RIGHT_MOTOR_CHANNEL, right_motor_thrust);
-    ledcWrite(BOTTOM_MOTOR_CHANNEL, bottom_motor_thrust);
-    ledcWrite(TOP_MOTOE_CHANNEL, top_motor_thrust);
-
-    record.top_motor_thrust = top_motor_thrust;
-    record.bottom_motor_thrust = bottom_motor_thrust;
-    record.right_motor_thrust = right_motor_thrust;
-    record.left_motor_thrust = left_motor_thrust;
-
-    flightRecorder.insertAndFlushIfReady(record);
-
-    //  if (shouldLog)
-    //     {
-    //       Serial.print(top_motor_thrust);
-    //       Serial.print(",");
-    //       Serial.print(bottom_motor_thrust);
-    //       Serial.print(",");
-    //       Serial.print(right_motor_thrust);
-    //       Serial.print(",");
-    //       Serial.println(left_motor_thrust);
-    //     }
-    // if (esp_now_send_attiude_msg(attiude))
-    // {
-    //  // Serial.println("Attidue sent");
-    // }
-    // else
-    // {
-    //   Serial.println("Attidue send failed");
-    // }
-  }
-};
-
-class DroneConnectionCallback : public ConnectionStateCallback
-{
-  void onConnectionStateChange(ConnectionState state)
-  {
-    isConnected = state == CONNECTED;
-    if (isConnected)
-    {
-      Serial.println("Phone is Connected");
-    }
+double setPointToYawRate(int setPoint) {
+    if (setPoint == 255)
+        return -65.0;
+    else if (setPoint == 127)
+        return 65.0;
     else
-    {
-      Serial.println("Phone is Disconnected");
-    }
-  }
-};
-
-class DroneControlCallback : public DroneAttitudeCallback
-{
-  void onAttitudeChange(unsigned int thrust, unsigned int pitch_setpoint, unsigned int roll_setpoint, unsigned int yaw_setpoint)
-  {
-    initial_speed = thrust;
-    setpoints[0] = static_cast<double>(pitch_setpoint);
-    setpoints[1] = static_cast<double>(roll_setpoint);
-    setpoints[2] = static_cast<double>(yaw_setpoint);
-    // Serial2.print("thrust = ");
-    //  Serial2.println(initial_speed);
-    vTaskDelay(1);
-
-    // double pitch_setpoint_as_angle = setpointToAngle(setPoints[0]);
-    // double roll_setpoint_as_angle = setpointToAngle(setPoints[1]);
-
-    // Serial2.print("pitch_setpint_as_angle = ");
-    // Serial2.println(pitch_setpoint_as_angle, 2);
-
-    // Serial2.print("roll_setpint_as_angle = ");
-    // Serial2.println(roll_setpoint_as_angle, 2);
-  }
-};
-
-void sendGeneralMsg(String msg)
-{
-  if (isConnected)
-  {
-    connectionManager.write20ByteMsg(std::string(msg.c_str()));
-    // esp_now_send_str_msg(msg.c_str());
-  }
-};
-
-class NewGainCallback : public GainCallback
-{
-  void onNewGain(double pitch_kp, double pitch_ki, double pitch_kd,
-                 double roll_kp, double roll_ki, double roll_kd,
-                 double yaw_kp, double yaw_ki, double yaw_kd)
-  {
-    // if (shouldLog)
-    // {
-    //   String pitch_gains_str = "New pitch gains = " + String(pitch_kp, 2) + "," + String(pitch_ki, 3) + "," + String(pitch_kd, 3);
-    //   String roll_gains_str = "New roll gains = " + String(roll_kp, 3) + "," + String(roll_ki, 3) + "," + String(roll_kd, 3);
-    //   String yaw_gains_str = "New yaw gains = " + String(yaw_kp, 2) + " " + String(yaw_ki, 2) + " " + String(yaw_kd, 2);
-
-    //   Serial.println(pitch_gains_str);
-    //   Serial.println(roll_gains_str);
-    //   Serial.println(yaw_gains_str);
-    // }
-
-    pitch_gains[0] = pitch_kp;
-    pitch_gains[1] = pitch_ki;
-    pitch_gains[2] = pitch_kd;
-
-    roll_gains[0] = roll_kp;
-    roll_gains[1] = roll_ki;
-    roll_gains[2] = roll_kd;
-
-    yaw_gains[0] = yaw_kp;
-    yaw_gains[1] = yaw_ki;
-
-    mPID.reset(pitch_gains, roll_gains, yaw_gains);
-  }
-};
-
-void mesuareOffsets()
-{
-  int counter = 0;
-  int sumPitch = 0;
-  int sumRoll = 0;
-  int sumYaw = 0;
-  int sumPitchRate = 0;
-  int sumRollRate = 0;
-
-  while (counter <= 1049)
-  {
-    if (imu.imu_loop())
-    {
-      if (counter >= 999)
-      {
-        sumPitch += imu.getPitch();
-        sumRoll += imu.getRoll();
-        sumYaw += imu.getGyroZ();
-        sumPitchRate += imu.getGyroY();
-        sumRollRate += imu.getGyroX();
-        //altitude_offest = sensor.readRangeContinuousMillimeters();
-      }
-      counter++;
-      delay(5);
-    }
-  }
-
-  pitch_offset = static_cast<double>(sumPitch / 50.0);
-  roll_offset = static_cast<double>(sumRoll / 50.0);
-  yaw_rate_offset = static_cast<double>(sumYaw / 50.0);
-  pitch_rate_offset = static_cast<double>(sumPitchRate / 50.0);
-  roll_rate_offset = static_cast<double>(sumRollRate / 50.0);
-
-  // if (shouldLog)
-  // {
-  //   Serial.print("Pitch offs = ");
-  //   Serial.print(pitch_offset);
-
-  //   Serial.print("Roll offs = ");
-  //   Serial.print(roll_offset);
-  // }
+        return 0.0;
 }
 
-void initServo()
-{
-  ledcSetup(TOP_MOTOE_CHANNEL, 500, 8);    // channel 0, 500 hz PWM, 8-bit resolution
-  ledcSetup(BOTTOM_MOTOR_CHANNEL, 500, 8); // channel 1, 500 hz PWM, 8-bit resolution
-  ledcSetup(RIGHT_MOTOR_CHANNEL, 500, 8);  // channel 2, 500 hz PWM, 8-bit resolution
-  ledcSetup(LEFT_MOTOR_CHANNEL, 500, 8);   // channel 3, 500 hz PWM, 8-bit resolution
-  ledcAttachPin(TOP_MOTOR_PIN, TOP_MOTOE_CHANNEL);
-  ledcAttachPin(BOTTOM_MOTOR_PIN, BOTTOM_MOTOR_CHANNEL);
-  ledcAttachPin(RIGHT_MOTOR_PIN, RIGHT_MOTOR_CHANNEL);
-  ledcAttachPin(LEFT_MOTOR_PIN, LEFT_MOTOR_CHANNEL);
+void onAttitudeChangeCallback(int thrust, int pitch, int roll, int yaw) {
+    AttitudeModel model = AttitudeModel{
+            .thrust = thrust,
+            .pitchSetPoint = setPointToAngle(pitch),
+            .rollSetPoint = setPointToAngle(roll) * -1,
+            .yawSetPoint = setPointToYawRate(yaw)
+    };
+
+    if (xQueueSend(attitudeQueueHandle, &model, sendWaitTime) == pdPASS) {
+#ifdef DebugMode
+        Log::d("Enqueue new attitude success");
+#endif
+    } else {
+#ifdef DebugMode
+        Log::d("Enqueue new attitude failed");
+#endif
+    }
+
+#ifdef DebugMode
+    Log::d("thrust = " + std::to_string(thrust));
+    Log::d("pitch = " + std::to_string(pitch));
+    Log::d("roll = " + std::to_string(roll));
+    Log::d("yaw = " + std::to_string(yaw));
+#endif
 }
 
-void setup()
-{
-  pinMode(2, OUTPUT);
-  pinMode(TOP_MOTOR_PIN, OUTPUT);
-  pinMode(BOTTOM_MOTOR_PIN, OUTPUT);
-  pinMode(RIGHT_MOTOR_PIN, OUTPUT);
-  pinMode(LEFT_MOTOR_PIN, OUTPUT);
-  if (shouldLog)
-  {
+void onNewGainCallback(const std::vector<double> &&gains) {
+    xSemaphoreTake(xMutex, portMAX_DELAY);
+
+    pitchPID.Gains(gains[0], gains[1], gains[2]);
+    rollPID.Gains(gains[3], gains[4], gains[5]);
+    yawPID.Gains(gains[5], gains[7], gains[8]);
+
+    xSemaphoreGive(xMutex);
+}
+
+void measureOffsets() {
+    int counter = 0;
+    int sumPitch = 0;
+    int sumRoll = 0;
+    int sumYaw = 0;
+    int sumPitchRate = 0;
+    int sumRollRate = 0;
+
+    while (counter <= 1049) {
+        if (imu.imu_loop()) {
+            if (counter >= 999) {
+                sumPitch += static_cast<int>(imu.getPitch());
+                sumRoll += static_cast<int>(imu.getRoll());
+                sumYaw += static_cast<int>(imu.getGyroZ());
+                sumPitchRate += static_cast<int>(imu.getGyroY());
+                sumRollRate += static_cast<int>(imu.getGyroX());
+            }
+            counter++;
+            delay(5);
+        }
+    }
+
+    pitch_offset = static_cast<double>(sumPitch / 50.0);
+    roll_offset = static_cast<double>(sumRoll / 50.0);
+    yaw_rate_offset = static_cast<double>(sumYaw / 50.0);
+    pitch_rate_offset = static_cast<double>(sumPitchRate / 50.0);
+    roll_rate_offset = static_cast<double>(sumRollRate / 50.0);
+}
+
+void setupPins() {
+    pinMode(LED_PIN, OUTPUT);
+    pinMode(MOTOR_A_PIN, OUTPUT);
+    pinMode(MOTOR_B_PIN, OUTPUT);
+    pinMode(MOTOR_C_PIN, OUTPUT);
+    pinMode(MOTOR_D_PIN, OUTPUT);
+
+    ledcSetup(MOTOR_A_CHANNEL, 500, 8); // channel 0, 500 hz PWM, 8-bit resolution
+    ledcSetup(MOTOR_B_CHANNEL, 500, 8); // channel 1, 500 hz PWM, 8-bit resolution
+    ledcSetup(MOTOR_C_CHANNEL, 500, 8); // channel 2, 500 hz PWM, 8-bit resolution
+    ledcSetup(MOTOR_D_CHANNEL, 500, 8); // channel 3, 500 hz PWM, 8-bit resolution
+
+    ledcAttachPin(MOTOR_A_PIN, MOTOR_A_CHANNEL);
+    ledcAttachPin(MOTOR_B_PIN, MOTOR_B_CHANNEL);
+    ledcAttachPin(MOTOR_C_PIN, MOTOR_C_CHANNEL);
+    ledcAttachPin(MOTOR_D_PIN, MOTOR_D_CHANNEL);
+}
+
+void calculateAttitude() {
+    imu.imu_loop();
+
+    pitch_filter.Filter(static_cast<double>(imu.getPitch()) - pitch_offset);
+    roll_filter.Filter(static_cast<double>(imu.getRoll()) - roll_offset);
+
+    current_angles[0] = pitch_filter.Current();
+    current_angles[1] = roll_filter.Current();
+
+    gyroZ_filter.Filter(static_cast<double>(imu.getGyroZ()) - yaw_rate_offset);
+    gyroY_filter.Filter(static_cast<double>(imu.getGyroY() - pitch_rate_offset));
+    gyroX_filter.Filter(static_cast<double>(imu.getGyroX() - roll_rate_offset));
+
+    current_rates[0] = gyroY_filter.Current(); // pitch_rate
+    current_rates[1] = gyroX_filter.Current(); // roll_rate
+    current_rates[2] = gyroZ_filter.Current(); // yaw_rate
+
+#if defined(DebugMode) || defined(SerialDebugMode)
+    Log::print(std::to_string(current_angles[0]) + ",");
+    Log::print(std::to_string(current_angles[1]) + ",");
+    Log::print(std::to_string(current_rates[0]) + ",");
+    Log::print(std::to_string(current_rates[1]) + ",");
+    Log::print(std::to_string(current_rates[2]) + ",");
+#endif
+}
+
+void stopAllMotors() {
+    ledcWrite(MOTOR_D_CHANNEL, 0);
+    ledcWrite(MOTOR_C_CHANNEL, 0);
+    ledcWrite(MOTOR_B_CHANNEL, 0);
+    ledcWrite(MOTOR_A_CHANNEL, 0);
+}
+
+void setup() {
+#if defined(DebugMode) || defined(SerialDebugMode)
     Serial.begin(9600);
-  }
-  connectionManager.begin(new DroneConnectionCallback(), new DroneControlCallback(), new NewGainCallback());
-  // begin_esp_now(new DroneConnectionCallback(), new DroneControlCallback(), new NewGainCallback());
-  mPID.begin(new DronePidCallback());
-  motorManager.begin(new MotorCallback());
-  mPID.reset(pitch_gains, roll_gains, yaw_gains);
-  flightRecorder.begin(new RecorderCallback());
+#endif
 
-  initServo();
+    setupPins();
 
-  while (!isConnected)
-  {
-    Serial.println("Waiting for connection");
-    delay(2000);
-  }
+    bleManager->setConnectionCallback(onConnectionChangeCallback);
+    bleManager->setAttitudeCallback(onAttitudeChangeCallback);
+    bleManager->setGainsCallback(onNewGainCallback);
 
-  imu.imuSetup();
+    bleManager->init();
 
-  // sensor.setTimeout(500);
-  // if (!sensor.init())
-  // {
-  //   Serial.println("Failed to detect and initialize sensor!");
-  //   while (1)
-  //   {
-  //   }
-  // }
+    while (!isConnected) {
+        Log::d("Waiting for connection");
+        delay(1000);
+    }
 
-  // sensor.startContinuous();
-
-  Serial.println("All set!");
-}
-
-void calca_attitude()
-{
- // int16_t altitude = sensor.readRangeContinuousMillimeters() - altitude_offest;
-//  altitude_filter.Filter(altitude);
- // current_altitude = altitude_filter.Current();
-
-  current_pitch_filter.Filter(static_cast<double>(imu.getPitch()) - pitch_offset);
-  current_roll_filter.Filter(static_cast<double>(imu.getRoll()) - roll_offset);
-
-  current_angles[0] = current_pitch_filter.Current();
-  current_angles[1] = current_roll_filter.Current();
-
-  gyroZ_filter.Filter(static_cast<double>(imu.getGyroZ()) - yaw_rate_offset);
-  gyroY_filter.Filter(static_cast<double>(imu.getGyroY() - pitch_rate_offset));
-  gyroX_filter.Filter(static_cast<double>(imu.getGyroX() - roll_rate_offset));
-
-  current_rates[0] = gyroY_filter.Current(); // pitch_rate
-  current_rates[1] = gyroX_filter.Current(); // roll_rate
-  current_rates[2] = gyroZ_filter.Current(); // yaw_rate
-
-  // if (shouldLog)
-  // {
-  //   Serial.print(current_angles[0]);
-  //   Serial.print(",");
-  //   Serial.print(current_angles[1]);
-  //   Serial.print(",");
-  //   Serial.print(current_rates[0]);
-  //   Serial.print(",");
-  //   Serial.print(current_rates[1]);
-  //   Serial.print(",");
-  //   Serial.print(current_rates[2]);
-  //   Serial.print(",");
-  // }
-}
-
-// void loop()
-// {
-//   vTaskDelay(10000);
-//   for (size_t i = 0; i < 20; i++)
-//   {
-//     PackedFlightRecord record = {
-//         .millis = static_cast<uint32_t>(millis()),
-//         .pitch_setpoint = 0,
-//         .roll_setpoint = 10,
-//         .yaw_setpoint = 30,
-
-//         .alttiude = 400,
-
-//         .pitch_angle = 10,
-//         .roll_angle = 2,
-//         .yaw_rate = 3,
-
-//         .pitch_p = 4,
-//         .pitch_i = 5,
-//         .pitch_d = 6,
-
-//         .roll_p = 4,
-//         .roll_i = 5,
-//         .roll_d = 6,
-
-//         .yaw_p = 7,
-//         .yaw_i = 8,
-//         .yaw_d = 9,
-
-//         .top_motor_thrust = 100,
-//         .bottom_motor_thrust = 100,
-//         .right_motor_thrust = 100,
-//         .left_motor_thrust = 111};
-
-//     delay(50);
-
-//     flightRecorder.insertAndFlushIfReady(record);
-//   }
-// }
-
-void loop()
-{
-  if (!did_mesuare_offset)
-  {
-    mesuareOffsets();
-    Serial.println("Offset calc done!");
+    imu.imuSetup();
     delay(1000);
-    Serial.println("Offsets: P = " + String(pitch_offset, 2) + ",R = " + String(roll_offset, 2) + ",y = " + String(yaw_rate_offset, 2));
-    did_mesuare_offset = true;
-  }
+    measureOffsets();
 
-  digitalWrite(2, isConnected ? HIGH : LOW);
+#if defined(DebugMode) || defined(SerialDebugMode)
+    Log::d("Offset calc done!");
+    std::string msg = "Offsets: Pitch = " + std::to_string(pitch_offset) + ", Roll = " + std::to_string(roll_offset) +
+                      ", Yaw = " + std::to_string(yaw_rate_offset);
+    Log::d(msg);
+    Log::d("All set!");
+#endif
+}
 
-  if (!isConnected)
-  {
-    initial_speed = 0;
-  }
-
-  if ((millis() - previous_millis) >= SPEED_RATE)
-  {
-    if (imu.imu_loop())
-    {
-      calca_attitude();
+void loop() {
+    xSemaphoreTake(xMutex, portMAX_DELAY);
+    if (!isConnected) {
+        xSemaphoreGive(xMutex);
+        // Stop all motors, reset thrust filters and disarm if not connected
+        stopAllMotors();
+        thrustManager.resetMotorsFilters();
+        isArmed = false;
+        delay(100);
+        return;
     }
 
-    record = {
-        .millis = millis(),
-
-        .pitch_setpoint = (uint8_t)setpoints[0],
-        .roll_setpoint = (uint8_t)setpoints[1],
-        .yaw_setpoint = (uint8_t)setpoints[2],
-
-        .alttiude = (int16_t)initial_speed,
-
-        .pitch_angle = static_cast<int16_t>(current_angles[0]),
-        .roll_angle = static_cast<int16_t>(current_angles[1]),
-        .yaw_rate = static_cast<int16_t>(current_rates[2])};
-
-    motorManager.set_initial_speed(initial_speed);
-
-    if (initial_speed > 0)
-    {
-      mPID.setSampleTime(static_cast<double>(millis() - previous_millis) / 1000.0);
-      mPID.setSetPoints(setpoints);
-      mPID.setAngles(current_angles);
-      mPID.setRates(current_rates);
-      mPID.compute();
-    }
-    else
-    {
-      ledcWrite(TOP_MOTOE_CHANNEL, 0);
-      ledcWrite(BOTTOM_MOTOR_CHANNEL, 0);
-      ledcWrite(RIGHT_MOTOR_CHANNEL, 0);
-      ledcWrite(LEFT_MOTOR_CHANNEL, 0);
-    }
-
+    double sampleTime = static_cast<double>(millis() - previous_millis) / 1000.0;
     previous_millis = millis();
-  }
+
+    AttitudeModel receivedModel{};
+    if (xQueueReceive(attitudeQueueHandle, &receivedModel, receiveWaitTime) == pdPASS) {
+
+#ifdef DebugMode
+        Log::d("************************Received an attitude model************************");
+#endif
+        pitchPID.SetPoint(receivedModel.pitchSetPoint);
+        rollPID.SetPoint(receivedModel.rollSetPoint);
+        yawPID.SetPoint(receivedModel.yawSetPoint);
+        thrustManager.updateBaseThrust(receivedModel.thrust);
+
+        isArmed = receivedModel.thrust > 0;
+    } else {
+#ifdef DebugMode
+        Log::d("Couldn't receive the attitude model in time");
+#endif
+    }
+
+    if (!isArmed) {
+        xSemaphoreGive(xMutex);
+        stopAllMotors();
+        thrustManager.resetMotorsFilters();
+        delay(100);
+        //flightRecorder.flushNow();
+        return;
+    }
+
+    calculateAttitude();
+
+    PIDModel pitchPIDModel = pitchPID.Compute(sampleTime, current_angles[0], current_rates[0]);
+    PIDModel rollPIDModel = rollPID.Compute(sampleTime, current_angles[1], current_rates[1]);
+    PIDModel yawPIDModel = yawPID.Compute(sampleTime, current_rates[2], 0);
+
+    xSemaphoreGive(xMutex);
+
+    double pitch_pid = pitchPIDModel.total();
+    double roll_pid = rollPIDModel.total();
+    double yaw_pid = yawPIDModel.total();
+
+    pitch_pid = pitch_pid > MOTOR_HIGH_BOUNDARY ? MOTOR_HIGH_BOUNDARY : pitch_pid;
+    roll_pid = roll_pid > MOTOR_HIGH_BOUNDARY ? MOTOR_HIGH_BOUNDARY : roll_pid;
+    yaw_pid = yaw_pid > MOTOR_HIGH_BOUNDARY ? MOTOR_HIGH_BOUNDARY : yaw_pid;
+
+    pitch_pid = pitch_pid < MOTOR_LOW_BOUNDARY ? MOTOR_LOW_BOUNDARY : pitch_pid;
+    roll_pid = roll_pid < MOTOR_LOW_BOUNDARY ? MOTOR_LOW_BOUNDARY : roll_pid;
+    yaw_pid = yaw_pid < MOTOR_LOW_BOUNDARY ? MOTOR_LOW_BOUNDARY : yaw_pid;
+
+    ThrustModel thrustModel = thrustManager.calculateMotorsThrust(pitch_pid, roll_pid, yaw_pid);
+
+    ledcWrite(MOTOR_D_CHANNEL, thrustModel.motor_d_thrust);
+    ledcWrite(MOTOR_C_CHANNEL, thrustModel.motor_c_thrust);
+    ledcWrite(MOTOR_B_CHANNEL, thrustModel.motor_b_thrust);
+    ledcWrite(MOTOR_A_CHANNEL, thrustModel.motor_a_thrust);
+
+
+#if defined(DebugMode) || defined(SerialDebugMode)
+    Log::print(std::to_string(sampleTime) + ",");
+
+    Log::print(std::to_string(pitchPIDModel.proportional) + ",");
+    Log::print(std::to_string(pitchPIDModel.integral) + ",");
+    Log::print(std::to_string(pitchPIDModel.derivative) + ",");
+    Log::print(std::to_string(pitchPIDModel.total()) + ",");
+
+    Log::print(std::to_string(rollPIDModel.proportional) + ",");
+    Log::print(std::to_string(rollPIDModel.integral) + ",");
+    Log::print(std::to_string(rollPIDModel.derivative) + ",");
+    Log::print(std::to_string(rollPIDModel.total()) + ",");
+
+    Log::print(std::to_string(yawPIDModel.proportional) + ",");
+    Log::print(std::to_string(yawPIDModel.integral) + ",");
+    Log::print(std::to_string(yawPIDModel.total()) + ",");
+
+    Log::print(std::to_string(thrustModel.motor_a_thrust) + ",");
+    Log::print(std::to_string(thrustModel.motor_b_thrust) + ",");
+    Log::print(std::to_string(thrustModel.motor_c_thrust) + ",");
+    Log::d(static_cast<double>(thrustModel.motor_d_thrust));
+#endif
+
+    record = FlightRecord{
+            .millis = millis(),
+
+            .pitchSetPoint = (uint8_t) pitchPID.SetPoint(),
+            .rollSetPoint = (uint8_t) rollPID.SetPoint(),
+            .yawSetPoint = (uint8_t) yawPID.SetPoint(),
+
+            .altitude = (int16_t) thrustManager.baseThrust(),
+
+            .pitch = static_cast<int16_t>(current_angles[0]),
+            .roll = static_cast<int16_t>(current_angles[1]),
+            .yawRate = static_cast<int16_t>(current_rates[2]),
+
+            .pitch_p = static_cast<int16_t>(pitchPIDModel.proportional),
+            .pitch_i = static_cast<int16_t>(pitchPIDModel.integral),
+            .pitch_d = static_cast<int16_t>(pitchPIDModel.derivative),
+
+            .roll_p = static_cast<int16_t>(rollPIDModel.proportional),
+            .roll_i = static_cast<int16_t>(rollPIDModel.integral),
+            .roll_d = static_cast<int16_t>(rollPIDModel.derivative),
+
+            .yaw_p = static_cast<int16_t>(yawPIDModel.proportional),
+            .yaw_i = static_cast<int16_t>(yawPIDModel.integral),
+            .yaw_d = static_cast<int16_t>(yawPIDModel.derivative),
+
+            .motor_a_thrust = (uint8_t) thrustModel.motor_a_thrust,
+            .motor_b_thrust = (uint8_t) thrustModel.motor_b_thrust,
+            .motor_c_thrust = (uint8_t) thrustModel.motor_c_thrust,
+            .motor_d_thrust = (uint8_t) thrustModel.motor_d_thrust
+    };
+
+
+    // flightRecorder.insertAndFlushIfReady(record);
 }
